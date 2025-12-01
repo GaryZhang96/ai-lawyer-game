@@ -7,25 +7,9 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-// --- 启动时自检：列出所有可用模型 ---
-// 这样我们就能在 Render 日志里看到你到底拥有哪些模型权限
-if (process.env.GEMINI_API_KEY) {
-  const key = process.env.GEMINI_API_KEY;
-  const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`;
-  
-  fetch(listUrl)
-    .then(res => res.json())
-    .then(data => {
-      console.log("---------------------------------------------------");
-      console.log("【账号权限自检】你的 API Key 支持以下模型：");
-      if (data.models) {
-        data.models.forEach(m => console.log(` - ${m.name}`));
-      } else {
-        console.log("未找到模型列表，可能是 Key 权限不足或被锁区。", JSON.stringify(data));
-      }
-      console.log("---------------------------------------------------");
-    })
-    .catch(err => console.error("自检失败:", err));
+// 检查 OpenRouter Key
+if (!process.env.OPENROUTER_API_KEY) {
+  console.error("【严重错误】Render 环境变量中未找到 OPENROUTER_API_KEY！");
 }
 
 const SYSTEM_PROMPT = `
@@ -46,41 +30,53 @@ const SYSTEM_PROMPT = `
 `;
 
 app.post('/api/chat', async (req, res) => {
-  const { history, message } = req.body;
-  console.log(`收到玩家消息: ${message}`);
-
   try {
-    // 尝试使用 gemini-1.5-flash (这是目前最标准的型号)
-    const apiKey = process.env.GEMINI_API_KEY;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+    const { history, message } = req.body;
+    console.log(`收到消息: ${message}`);
 
-    const apiBody = {
-      contents: [
-        { role: "user", parts: [{ text: SYSTEM_PROMPT }] }, // 注入规则
-        { role: "model", parts: [{ text: "OK. JSON mode engaged." }] },
-        ...history.map(h => ({
-          role: h.role === 'user' ? 'user' : 'model',
-          parts: [{ text: h.text }]
-        })),
-        { role: "user", parts: [{ text: message }] }
-      ],
-      generationConfig: { temperature: 0.7 }
-    };
+    // --- 构造请求 ---
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...history.map(h => ({
+        role: h.role === 'user' ? 'user' : 'assistant', 
+        content: h.text
+      })),
+      { role: "user", content: message }
+    ];
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(apiBody)
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/my-lawyer-game", 
+        "X-Title": "AI Lawyer Game"
+      },
+      body: JSON.stringify({
+        // 【关键修改】这里指定使用 Claude 模型
+        // 目前地表最强逻辑模型：Claude 3.5 Sonnet
+        // 如果未来 4.5 出了，只需改成 "anthropic/claude-4.5-sonnet"
+        model: "anthropic/claude-4.5-sonnet", 
+        
+        messages: messages,
+        temperature: 0.7, // 0.7 比较适合有创意的辩论
+        // Claude 对 json_object 模式的支持稍有不同，我们通过 Prompt 强约束即可
+      })
     });
 
     if (!response.ok) {
-      throw new Error(`API Status ${response.status}`); // 抛出错误，进入下方的 catch 环节
+      const errText = await response.text();
+      // 如果余额不足，这里会报错 "Insufficient credits"
+      throw new Error(`OpenRouter Error: ${errText}`);
     }
 
     const data = await response.json();
-    let text = data.candidates[0].content.parts[0].text;
-    
-    // 清洗数据
+    console.log("OpenRouter/Claude 响应:", JSON.stringify(data));
+
+    // 解析 Claude 的回复
+    let text = data.choices[0].message.content;
+
+    // 清洗数据 (Claude 有时会很礼貌地加前缀，必须删掉)
     text = text.replace(/```json/g, '').replace(/```/g, '').trim();
     const firstBrace = text.indexOf('{');
     const lastBrace = text.lastIndexOf('}');
@@ -92,48 +88,21 @@ app.post('/api/chat', async (req, res) => {
     res.json(jsonResponse);
 
   } catch (error) {
-    console.error("【AI 连接失败，切换至备用脚本模式】:", error.message);
-
-    // --- 备用发电机 (Fallback Logic) ---
-    // 如果 AI 挂了，我们用简单的关键词匹配来模拟游戏，保证 UI 不报错
+    console.error("【后端报错】:", error);
     
-    let fallbackResponse = {
-      speaker: "Judge (Offline)",
-      text: "（AI连接波动，启动应急法官）本庭已记录你的发言。请继续出示证据。",
-      mood: "neutral",
-      jury_trust: 50,
-      game_phase: "trial",
-      log: "Offline Mode"
-    };
-
-    // 简单的关键词检测逻辑
-    if (message.includes("眼镜") || message.includes("视力") || message.includes("看不清")) {
-      fallbackResponse.speaker = "Witness";
-      fallbackResponse.text = "呃……那天晚上确实很黑……我可能……也没戴眼镜……";
-      fallbackResponse.mood = "nervous";
-      fallbackResponse.jury_trust = 75;
-      fallbackResponse.log = "击中要害 (Scripted)";
-    } else if (message.includes("爆胎") || message.includes("汽车")) {
-      fallbackResponse.speaker = "Prosecutor";
-      fallbackResponse.text = "反对！这只是辩方律师的臆测！你有证据证明那是爆胎声吗？";
-      fallbackResponse.mood = "angry";
-      fallbackResponse.jury_trust = 60;
-      fallbackResponse.log = "逻辑冲突 (Scripted)";
-    } else if (message.includes("你好") || message.includes("开始")) {
-        fallbackResponse.speaker = "Judge";
-        fallbackResponse.text = "庭审正式开始。辩方律师，你可以开始盘问证人了。";
-        fallbackResponse.mood = "neutral";
-    } else {
-        fallbackResponse.speaker = "Prosecutor";
-        fallbackResponse.text = "辩方律师，你的发言毫无逻辑。请问你到底想问证人什么？";
-        fallbackResponse.mood = "confident";
-        fallbackResponse.jury_trust = 45;
+    // 如果是余额不足，提示玩家
+    let errorMsg = error.message;
+    if (error.message.includes("Insufficient credits")) {
+        errorMsg = "OpenRouter 余额不足，请充值 (No Credits)";
     }
 
-    // 稍微延迟一点返回，模拟思考
-    setTimeout(() => {
-        res.json(fallbackResponse);
-    }, 1000);
+    res.status(500).json({ 
+        speaker: "System", 
+        text: `法庭联机中断: ${errorMsg}`, 
+        mood: "nervous", 
+        jury_trust: 50, 
+        game_phase: "trial" 
+    });
   }
 });
 
