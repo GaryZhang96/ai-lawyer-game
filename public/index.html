@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Lawyer Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 简单的打字机光标效果 */
+        .typing::after { content: '|'; animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0; } }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-200 h-screen flex flex-col overflow-hidden font-sans">
+
+    <div class="flex-1 relative bg-gradient-to-b from-slate-800 to-slate-950 flex items-end justify-center pb-8">
+        
+        <div class="absolute top-4 right-4 bg-black/50 p-3 rounded border border-slate-700 w-64">
+            <div class="text-xs text-slate-400 uppercase mb-1 flex justify-between">
+                <span>有罪 (Guilty)</span>
+                <span>无罪 (Innocent)</span>
+            </div>
+            <div class="h-3 bg-slate-800 rounded-full overflow-hidden border border-slate-600">
+                <div id="jury-bar" class="h-full bg-amber-500 transition-all duration-1000" style="width: 50%"></div>
+            </div>
+            <div class="text-center text-xs mt-1 text-amber-500 font-mono">信任度: <span id="jury-val">50</span>%</div>
+        </div>
+
+        <div class="flex gap-8 items-end opacity-90">
+            <div id="char-prosecutor" class="flex flex-col items-center transition-transform duration-500 opacity-50">
+                <div class="w-24 h-48 bg-red-900/50 border-b-4 border-red-500 rounded-t flex items-center justify-center text-red-300 font-bold text-2xl">
+                    检
+                </div>
+                <span class="text-xs text-red-500 mt-2 uppercase">检察官 Viper</span>
+            </div>
+
+            <div id="char-judge" class="flex flex-col items-center mb-8 z-10 transition-transform duration-500">
+                <div class="w-32 h-32 bg-slate-700 border-4 border-amber-600 rounded-full flex items-center justify-center text-amber-500 font-bold text-4xl shadow-2xl">
+                    法
+                </div>
+            </div>
+
+            <div id="char-witness" class="flex flex-col items-center transition-transform duration-500 opacity-50">
+                <div class="w-24 h-48 bg-blue-900/50 border-b-4 border-blue-500 rounded-t flex items-center justify-center text-blue-300 font-bold text-2xl">
+                    证
+                </div>
+                <span class="text-xs text-blue-500 mt-2 uppercase">目击证人</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="chat-box" class="h-1/3 bg-slate-900/95 border-t border-slate-700 p-6 overflow-y-auto space-y-4">
+        <div class="text-center text-slate-500 text-sm italic">—— 庭审开始，请点击下方"阅读卷宗" ——</div>
+    </div>
+
+    <div class="h-20 bg-black border-t border-slate-800 flex items-center px-4 gap-4">
+        <button onclick="toggleDossier()" class="h-12 px-4 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-xs uppercase flex flex-col items-center justify-center gap-1 text-slate-300 transition-colors">
+            📂 卷宗
+        </button>
+        
+        <input type="text" id="user-input" placeholder="输入你的质询..." class="flex-1 h-12 bg-slate-900 border border-slate-700 rounded px-4 focus:border-amber-500 focus:outline-none transition-colors" onkeypress="handleKeyPress(event)">
+        
+        <button onclick="sendMessage()" id="send-btn" class="h-12 px-8 bg-amber-700 hover:bg-amber-600 text-white font-bold rounded uppercase tracking-widest transition-colors shadow-lg shadow-amber-900/20">
+            异议! (Send)
+        </button>
+    </div>
+
+    <div id="dossier-modal" class="fixed inset-0 bg-black/80 z-50 hidden flex items-center justify-center p-8" onclick="toggleDossier()">
+        <div class="bg-slate-100 text-slate-900 max-w-lg w-full p-8 rounded shadow-2xl rotate-1" onclick="event.stopPropagation()">
+            <h2 class="text-2xl font-bold mb-4 border-b-2 border-slate-900 pb-2">📂 案件卷宗：第42号</h2>
+            <div class="font-mono text-sm space-y-2">
+                <p><strong>被告：</strong>杰克 (22岁)</p>
+                <p><strong>罪名：</strong>持枪袭击</p>
+                <p class="bg-yellow-200 p-2 rounded"><strong>关键证词：</strong>证人玛丽太太声称：“我亲眼看到他在路灯下举起枪，然后听到砰的一声。”</p>
+                <p><strong>疑点：</strong>现场未发现弹壳，受害者头部为撞击伤。</p>
+            </div>
+            <p class="mt-6 text-xs text-slate-500 text-center">点击任意处关闭</p>
+        </div>
+    </div>
+
+    <script>
+        let historyData = []; // 保存给 AI 的历史记录
+        let isProcessing = false;
+
+        function toggleDossier() {
+            const el = document.getElementById('dossier-modal');
+            el.classList.toggle('hidden');
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') sendMessage();
+        }
+
+        function updateUI(speaker, mood) {
+            // 重置所有角色透明度
+            document.getElementById('char-prosecutor').style.opacity = '0.5';
+            document.getElementById('char-prosecutor').style.transform = 'scale(1)';
+            document.getElementById('char-judge').style.opacity = '0.5';
+            document.getElementById('char-witness').style.opacity = '0.5';
+            document.getElementById('char-witness').style.transform = 'scale(1)';
+
+            // 高亮当前说话者
+            let targetId = '';
+            if (speaker.includes('Prosecutor') || speaker.includes('Viper')) targetId = 'char-prosecutor';
+            else if (speaker.includes('Judge')) targetId = 'char-judge';
+            else if (speaker.includes('Witness')) targetId = 'char-witness';
+
+            if (targetId) {
+                const el = document.getElementById(targetId);
+                el.style.opacity = '1';
+                if (targetId !== 'char-judge') el.style.transform = 'scale(1.1)'; // 说话时放大
+            }
+        }
+
+        function addMessage(role, text, speakerName = '') {
+            const box = document.getElementById('chat-box');
+            const div = document.createElement('div');
+            const isUser = role === 'user';
+            
+            div.className = `flex flex-col ${isUser ? 'items-end' : 'items-start'}`;
+            div.innerHTML = `
+                <div class="${isUser ? 'bg-amber-600 text-white rounded-br-none' : 'bg-slate-700 text-slate-200 rounded-bl-none border-l-4 border-amber-500'} px-4 py-3 rounded-lg max-w-[85%] shadow-md">
+                    ${!isUser ? `<div class="text-xs font-bold text-amber-500 mb-1 uppercase">${speakerName}</div>` : ''}
+                    <div>${text}</div>
+                </div>
+            `;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('user-input');
+            const text = input.value.trim();
+            if (!text || isProcessing) return;
+
+            // 1. 显示玩家消息
+            addMessage('user', text);
+            historyData.push({ role: 'user', text: text });
+            input.value = '';
+            isProcessing = true;
+            document.getElementById('send-btn').innerText = '对方思考中...';
+            document.getElementById('send-btn').disabled = true;
+
+            try {
+                // 2. 发送给后端
+                // 注意：这里 URL 只要写相对路径，Render会自动处理
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ history: historyData, message: text })
+                });
+
+                const data = await res.json();
+
+                // 3. 处理 AI 回复
+                addMessage('ai', data.text, data.speaker);
+                historyData.push({ role: 'model', text: data.text }); // 保存 AI 回复到历史
+                
+                // 4. 更新 UI 状态
+                document.getElementById('jury-bar').style.width = data.jury_trust + '%';
+                document.getElementById('jury-val').innerText = data.jury_trust;
+                updateUI(data.speaker, data.mood);
+
+                if (data.log) {
+                    const logDiv = document.createElement('div');
+                    logDiv.className = "text-center text-xs text-slate-500 mt-2";
+                    logDiv.innerText = `[系统判定] ${data.log}`;
+                    document.getElementById('chat-box').appendChild(logDiv);
+                }
+
+                // 5. 胜负判定
+                if (data.game_phase === 'won') {
+                    alert("【胜诉】陪审团宣判无罪！你获得了佣金！");
+                } else if (data.game_phase === 'lost') {
+                    alert("【败诉】辩护失败，你被赶出了法庭。");
+                }
+
+            } catch (err) {
+                addMessage('ai', '网络连接错误，请检查 API Key 配置。', 'System');
+                console.error(err);
+            } finally {
+                isProcessing = false;
+                document.getElementById('send-btn').innerText = '异议! (Send)';
+                document.getElementById('send-btn').disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
